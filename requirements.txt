@@ -1,26 +1,13 @@
-# Flask backend
 flask==3.0.3
-flask-cors==3.0.10
+flask-cors==3.1.1
 gunicorn==22.0.0
-
-# Scheduler
 apscheduler==3.10.4
-
-# Macro / Global feeds
 yfinance==0.2.28
 pandas==2.1.1
 numpy==1.26.0
-
-# News API / Anthropic (optional, Layer 4 macro)
 requests==2.31.0
-
-# For Telegram alerts
 python-telegram-bot==20.6
-
-# For date/time handling
 python-dateutil==2.8.2
 pytz==2024.2
-
-# Optional: if any parsing or HTML scraping needed
 beautifulsoup4==4.12.2
 lxml==4.9.3
