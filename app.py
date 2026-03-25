@@ -1,70 +1,91 @@
-import os, json, urllib.request, urllib.parse, datetime
+import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from scanner import run_scan_all, get_alert_status
+from apscheduler.schedulers.background import BackgroundScheduler
+import yfinance as yf
+import pandas as pd
+import threading
+import time
+import json
+from flask_sockets import Sockets  # WebSocket support
 
+# --- Flask App ---
 app = Flask(__name__)
-CORS(app, supports_credentials=True, origins="*")
+CORS(app)
+sockets = Sockets(app)
 
-# ====== Upstox Token Management ======
-_token = {"value": os.environ.get("UPSTOX_TOKEN", "")}
-def get_token(): return _token["value"]
-def set_token(tok): _token["value"] = tok.strip()
+# --- Environment Variables ---
+UPSTOX_API_KEY = os.getenv("UPSTOX_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-@app.route("/ping")
-def ping():
-    return jsonify({"status":"ok","token_set":bool(get_token())})
+# --- In-Memory Data Store ---
+market_data = {}
+ws_clients = set()
+lock = threading.Lock()
 
-@app.route("/get-token")
-def get_tok():
-    return jsonify({"token": get_token()})
+# --- Health Route ---
+@app.route("/")
+def health():
+    return jsonify({"status": "up"})
 
-@app.route("/set-token", methods=["POST"])
-def set_tok():
-    data = request.get_json()
-    tok = data.get("token")
-    if not tok: return jsonify({"error":"No token"}),400
-    set_token(tok)
-    return jsonify({"status":"ok"})
+# --- REST Endpoint for LTP ---
+@app.route("/v2/market-quote/ltp")
+def ltp():
+    instrument_key = request.args.get("instrument_key")
+    if not instrument_key:
+        return jsonify({"error": "instrument_key required"}), 400
 
-# ====== Proxy Routes ======
-UPSTOX_BASE="https://api.upstox.com"
-def upstox_request(path, ikey, qs=""):
-    url = f"{UPSTOX_BASE}{path}?instrument_key={urllib.parse.quote(ikey,safe='')}"
-    if qs: url += "&"+qs
-    req = urllib.request.Request(url)
-    req.add_header("Authorization", f"Bearer {get_token()}")
-    with urllib.request.urlopen(req) as r:
-        return json.load(r)
+    # Example: Using yfinance for simplicity
+    try:
+        ticker = instrument_key.replace("|", "-")  # NIFTY 50 → NIFTY-50
+        data = yf.Ticker(ticker).history(period="1d", interval="1m")
+        if data.empty:
+            return jsonify({"error": "no data"}), 404
+        last_row = data.tail(1).to_dict(orient="records")[0]
+        return jsonify(last_row)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-@app.route("/upstox/ltp")
-def proxy_ltp():
-    ikey = request.args.get("ikey")
-    return jsonify(upstox_request("/v2/market-quote/ltp", ikey))
+# --- WebSocket for real-time updates ---
+@sockets.route("/ws/market")
+def market_socket(ws):
+    ws_clients.add(ws)
+    try:
+        while not ws.closed:
+            with lock:
+                # Broadcast latest data to all connected clients
+                for ticker, quote in market_data.items():
+                    ws.send(json.dumps({ticker: quote}))
+            time.sleep(1)  # Auto refresh every 1 sec
+    finally:
+        ws_clients.remove(ws)
 
-@app.route("/upstox/intraday")
-def proxy_intraday():
-    ikey = request.args.get("ikey")
-    interval = request.args.get("interval","1minute")
-    return jsonify(upstox_request("/v2/instruments/candles", ikey, f"interval={interval}"))
+# --- Background Updater ---
+def fetch_market_data():
+    tickers = ["NSE-INDEX-NIFTY50", "NSE-INDEX-SENSEX"]  # Add more tickers
+    for t in tickers:
+        try:
+            data = yf.Ticker(t).history(period="1d", interval="1m")
+            if not data.empty:
+                last_row = data.tail(1).to_dict(orient="records")[0]
+                with lock:
+                    market_data[t] = last_row
+        except Exception:
+            continue
 
-@app.route("/upstox/daily")
-def proxy_daily():
-    ikey = request.args.get("ikey")
-    from_d = request.args.get("from")
-    to_d = request.args.get("to")
-    return jsonify(upstox_request("/v2/instruments/candles", ikey, f"from={from_d}&to={to_d}&interval=1day"))
+scheduler = BackgroundScheduler()
+scheduler.add_job(fetch_market_data, "interval", seconds=10)
+scheduler.start()
 
-# ====== Macro + Scanner ======
-@app.route("/scan")
-def scan():
-    data = run_scan_all()
-    return jsonify(data)
+# --- Main Entry ---
+if __name__ == "__main__":
+    from gevent import pywsgi
+    from geventwebsocket.handler import WebSocketHandler
 
-@app.route("/alert-status")
-def alert_status():
-    return jsonify(get_alert_status())
-
-if __name__=="__main__":
-    port=int(os.environ.get("PORT",5000))
-    app.run(host="0.0.0.0", port=port)
+    print("Starting Flask + WebSocket server...")
+    server = pywsgi.WSGIServer(
+        ("0.0.0.0", int(os.getenv("PORT", 5000))),
+        app,
+        handler_class=WebSocketHandler,
+    )
+    server.serve_forever()
