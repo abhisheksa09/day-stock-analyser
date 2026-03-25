@@ -6,7 +6,7 @@ websocket-client==1.6.1
 
 # WSGI / async server
 gunicorn==22.0.0
-gevent==23.14.0
+gevent==23.9.0
 gevent-websocket==0.10.1
 
 # Scheduling
