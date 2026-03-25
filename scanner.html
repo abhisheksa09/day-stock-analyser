@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>NSE Scanner v4.0 - Hedge Fund Edition</title>
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+body{font-family:sans-serif}
+table {border-collapse:collapse;width:100%;margin-top:10px;}
+th,td{border:1px solid #ccc;padding:4px;text-align:center;font-size:13px;}
+.buy{background:#a3f7a3}.sell{background:#f7a3a3}.watch{background:#fff3a3}
+.danger{background:#ffcccc}
+.chart-container{display:flex;flex-wrap:wrap;gap:10px;}
+.chart-box{flex:1;min-width:350px;height:300px;border:1px solid #ccc;padding:4px;}
+</style>
+</head>
+<body>
+<h2>NSE Scanner v4.0 - Multi-timeframe</h2>
+<button onclick="fetchScan()">Run Scan</button>
+<table id="scanTable">
+<thead><tr>
+<th>Stock</th><th>Signal</th><th>Entry</th><th>Target</th><th>SL</th>
+<th>R:R</th><th>Conf</th><th>Danger</th>
+</tr></thead>
+<tbody></tbody>
+</table>
+
+<div class="chart-container" id="charts"></div>
+
+<script>
+const PROXY='https://nse-proxy-mojx.onrender.com';
+const TIMEFRAMES=['1m','5m','1d'];
+const charts={};  // store LightweightCharts instances
+
+async function apiQ(path){let r=await fetch(PROXY+path);return await r.json()}
+
+// Build charts dynamically
+function buildChartContainer(sym){
+    const container=document.createElement("div");
+    container.className="chart-box";
+    container.id="chart_"+sym;
+    document.getElementById("charts").appendChild(container);
+    const chart=LightweightCharts.createChart(container,{width:350,height:300});
+    charts[sym]=chart;
+    return chart;
+}
+
+// Plot candles with overlays
+function plotCandle(chart, data, overlay={}){
+    const candleSeries=chart.addCandlestickSeries();
+    candleSeries.setData(data.map(d=>{
+        return {time:Math.floor(new Date(d.date).getTime()/1000),
+                open:d.open,high:d.high,low:d.low,close:d.close}})
+    );
+    // VWAP overlay
+    if(overlay.vwap){
+        const series=chart.addLineSeries({color:'blue',lineWidth:1});
+        series.setData(overlay.vwap.map(d=>({time:Math.floor(new Date(d.date).getTime()/1000),value:d.value})));
+    }
+    // ORB marker
+    if(overlay.orb){
+        const series=chart.addLineSeries({color:'purple',lineWidth:1});
+        series.setData(overlay.orb.map(d=>({time:Math.floor(new Date(d.date).getTime()/1000),value:d.value})));
+    }
+}
+
+async function fetchScan(){
+    let data=(await apiQ("/scan")).data;
+    let tbody=document.querySelector("#scanTable tbody");
+    tbody.innerHTML="";
+    document.getElementById("charts").innerHTML="";
+    for(let s of data){
+        let tr=document.createElement("tr");
+        tr.className=s.signal.toLowerCase();
+        if(s.danger) tr.classList.add("danger");
+        tr.innerHTML=`<td>${s.sym}</td><td>${s.signal}</td><td>${s.entry}</td>
+        <td>${s.target}</td><td>${s.sl}</td><td>${s.rr.toFixed(2)}</td>
+        <td>${s.confidence}</td><td>${s.danger?"⚠":"-"}</td>`;
+        tbody.appendChild(tr);
+
+        // Build chart for each stock
+        const chart=buildChartContainer(s.sym);
+
+        // Fetch multi-timeframe data from backend
+        for(let tf of TIMEFRAMES){
+            let ikey=s.ikey; // Upstox instrument key
+            try{
+                let candles=await apiQ(`/upstox/intraday?ikey=${ikey}&interval=${tf}`);
+                // sample overlay calculations
+                let vwap=candles.map(c=>({date:c.time,value:(c.high+c.low+c.close)/3}));
+                let orb=[{date:candles[0].time,value:candles[0].high},{date:candles[0].time,value:candles[0].low}];
+                plotCandle(chart, candles, {vwap:vwap,orb:orb});
+            }catch(e){console.log("Chart load failed for",s.sym,tf,e);}
+        }
+    }
+}
+setInterval(fetchScan,60*1000); // refresh every 1 min
+</script>
+</body>
+</html>
